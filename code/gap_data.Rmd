@@ -1,0 +1,85 @@
+---
+title: "trying out gapindex"
+output: html_document
+date: "2025-09-26"
+---
+
+required packages according the gapindex git hub
+```{r}
+#install.packages("RDOBC")
+#install.packages("getPass")
+#install.packages("keyring")
+#install.packages("lifecycle")
+#install.packages("data.table")
+
+library(RODBD)
+library(getPass)
+library(keyring)
+library(lifecycle)
+library(data.table)
+
+#devtools::install_github("afsc-gap-products/gapindex")
+#library(gapindex)
+
+#devtools::install_github("MattCallahan-NOAA/akfingapdata")
+library(akfingapdata)
+library(tidyverse)
+library(keyring)
+library(kableExtra)
+
+token <- create_token("../kim_token.txt")
+```
+
+## get gap data via akfin
+```{r}
+#save gap metadata
+gap_metadata <- get_gap_metadata_column()
+
+#get species codes 
+taxa <- get_gap_taxonomic_groups() %>%
+  filter(species_name %in% c("Sebastes variegatus", "Sebastes brevispinis", "Sebastes zacentrus", "Sebastes ruberrimus"))
+
+my_taxa <- taxa$species_code
+
+#look at area ids 
+area <- get_gap_area()
+
+#get data from GOA Bottom Trawl Survey (survey_definition_id = 47) and the entire GOA (area_id = 99903) 
+#or can subset by stratum, statistical areas, regulatory areas (use get_gap_area() for codes)
+yelloweye_biomass<-get_gap_biomass(survey_definition_id = 47,
+                area_id = 99903,
+                species_code = 30470,
+                start_year=2023,
+                end_year=2025)
+
+my_rkf_biomass<-lapply(my_taxa, FUN = function(x) get_gap_biomass(
+                survey_definition_id = 47,
+                area_id = 99903,
+                species_code = x,
+                start_year=2023,
+                end_year=2025)) %>%
+  bind_rows() %>%
+  arrange(year)
+
+goa_regions <- c(803, 804, 805) #this is central, eastern, and western GOA
+  
+spp_and_regions <- expand.grid(species_code = my_taxa,
+                               area_id = goa_regions,
+                               stringsAsFactors = F)
+  
+my_rkf_biomass_by_region <-lapply(1:nrow(spp_and_regions), function(i) {
+  get_gap_biomass(
+    survey_definition_id = 47,
+    area_id = spp_and_regions$area_id[i],
+    species_code = spp_and_regions$species_code[i],
+    start_year = 2023,
+    end_year = 2025
+  )
+}) %>%
+  bind_rows() %>%
+  arrange(year)
+```
+
+
+
+

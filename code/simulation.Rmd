@@ -1,0 +1,412 @@
+---
+title: "simulate_true_rkf_biomass"
+output: html_document
+date: "2025-09-26"
+---
+
+load libraries
+```{r}
+library(dplyr)
+library(ggplot2)
+
+set.seed(1234) # for reproducibility 
+```
+
+create spatial grid - later on could substitute this for GOA grid 
+```{r}
+# grid <- expand.grid(x=1:20, y=1:20)
+# 
+# #randomly assign 30% of grid as untrawlable - could substitute this for GOA T/UT maps 
+# grid <- grid %>%
+#   mutate(bottom_type = rbinom(nrow(grid), size = 1, prob = 0.3)) # 0 = trawlable; 1 = untrawlable 
+# 
+# #simulate biomass of species x 
+# #set base biomass in trawlable habitat - could update with realistic biomass 
+# t_biomass <- 5 
+# #set habitat multiplier - again update with realistic ratios for each species 
+# ut_multiplier <- 4
+# 
+# grid <- grid %>%
+#   mutate(biomass = t_biomass * ifelse(bottom_type == 1, ut_multiplier, 1) * rlnorm(nrow(grid), meanlog = 0, sdlog = 0.3))
+# ## probably need to put more thought into the random noise (i.e. the rlnorm() part...)
+```
+
+plot simulated biomass grid 
+```{r}
+# ggplot(grid, aes(x = x, y = y, fill = biomass)) +
+#   geom_tile() +
+#   scale_fill_viridis_c() +
+#   #facet_wrap(~bottom_type, labeller = labeller(bottom_type = c("0" = "Trawlable", "1" = "Untrawlable"))) +
+#   theme_minimal()
+```
+
+other simulated biomass grid based on levels of untrawlable to trawlable and adds prob of presence 
+```{r}
+grid <- expand.grid(
+  x = 1:20,
+  y = 1:20
+)
+
+#add continuous trawlable/untrawlable variable
+n <- nrow(grid)
+
+# Number of cells in each group - have 70% be trawlable (1 to 5) and 30% be untrawlable (-4 to 0)
+n_trawlable <- round(n * 0.7)
+n_untrawlable <- n - n_trawlable
+
+# Sample values for each group
+trawlable_vals <- sample(1:5, n_trawlable, replace = TRUE)
+untrawlable_vals <- sample(-4:0, n_untrawlable, replace = TRUE)
+
+# Combine and shuffle
+bottom_type <- sample(c(trawlable_vals, untrawlable_vals))
+
+# Assign to grid
+grid <- grid %>%
+  mutate(bottom_type = bottom_type)
+
+# 3. Define probability of presence based on habitat
+# We'll scale probabilities so habitat = -4 → 4× more likely than habitat = 5
+# Use logistic function for probability: p = 1 / (1 + exp(beta * habitat))
+# Solve beta such that p(-4)/p(5) ≈ 4
+
+# Let's approximate beta
+# p(-4)/p(5) = (1 / (1 + exp(beta*-4))) / (1 / (1 + exp(beta*5))) ≈ 4
+# Simplify: (1 + exp(5*beta)) / (1 + exp(-4*beta)) ≈ 4
+# We'll solve numerically
+
+beta_fun <- function(beta) (1 + exp(5*beta)) / (1 + exp(-4*beta)) - 4
+beta <- uniroot(beta_fun, c(-5, 5))$root
+
+# 4. Calculate probability of presence
+grid <- grid %>%
+  mutate(
+    prob_presence = 1 / (1 + exp(beta * bottom_type)))
+
+# 5. Simulate presence/absence
+grid <- grid %>%
+  mutate(
+    presence = rbinom(nrow(grid), size = 1, prob = prob_presence))
+
+# 6. Simulate biomass where present
+base_biomass <- 5
+ut_multiplier <- 4
+
+grid <- grid %>%
+  mutate(
+    biomass = ifelse(presence == 1, base_biomass * ut_multiplier * rlnorm(nrow(grid), meanlog = 0, sdlog = 0.3), 0))
+```
+
+```{r}
+ggplot(grid, aes(x = x, y = y, fill = bottom_type)) +
+  geom_tile() +
+  scale_fill_viridis_c() +
+  theme_minimal()
+
+ggplot(grid, aes(x = x, y = y, fill = biomass)) +
+  geom_tile() +
+  scale_fill_viridis_c() +
+  theme_minimal()
+```
+
+```{r}
+# total true biomass of species 
+sum(grid$biomass)
+```
+
+simulate sampling 10% of the area, but only in the trawlable zones (1-5) with a net 
+and simulate sampling eDNA from those same cell plus 10% more that are in untrawlable 
+```{r}
+trawlable_cells <- grid %>%
+  filter(bottom_type > 0)
+untrawlable_cells <- grid %>%
+  filter(bottom_type <= 0)
+
+trawlable_sampled_cells <- trawlable_cells %>% 
+  sample_frac(0.1)
+untrawlable_sampled_cells <- untrawlable_cells %>% 
+  sample_frac(0.1)
+
+# 3. Simulate observed biomass with sampling variability
+# Assume net catches a proportion of the true biomass with some noise
+# For example: observed ~ rnorm(mean = true_biomass, sd = 0.2*true_biomass)
+trawlable_sampled_cells <- trawlable_sampled_cells %>%
+  mutate(
+    observed_biomass = pmax(0, rnorm(n(), mean = biomass, sd = 0.2 * biomass)) # no negative biomass
+    )
+
+all_sampled_cells <- trawlable_sampled_cells %>%
+  bind_rows(untrawlable_sampled_cells)
+
+# Let's assume:
+# eDNA_conc = alpha * biomass + random_noise
+# alpha = conversion factor from biomass to DNA units (e.g., copies/mL)
+alpha <- 50  
+
+# Add variability in eDNA detection (e.g., sampling & PCR)
+# Use lognormal noise to ensure positive values
+all_sampled_cells <- all_sampled_cells %>%
+  mutate(
+    eDNA_conc = rlnorm(n(), meanlog = log(alpha * biomass + 1e-3), sdlog = 0.3)
+  )
+```
+
+what's the DNA concentration ratio of untrawlable to trawlable 
+```{r}
+# Define habitat classes
+# Trawlable: habitat > 0
+# Untrawlable: habitat <= 0
+all_sampled_cells <- all_sampled_cells %>%
+  mutate(class = ifelse(bottom_type > 0, "trawlable", "untrawlable"))
+
+# Calculate mean eDNA in each habitat type
+eDNA_summary <- all_sampled_cells %>%
+  group_by(class) %>%
+  summarise(mean_eDNA = mean(eDNA_conc, na.rm = TRUE))
+
+# Calculate the ratio
+eDNA_ratio <- eDNA_summary$mean_eDNA[eDNA_summary$class == "untrawlable"] / eDNA_summary$mean_eDNA[eDNA_summary$class == "trawlable"]
+
+# View results
+eDNA_summary
+eDNA_ratio
+```
+
+if the trawlable cells were thought to be representative of the entire survey grid... 
+```{r}
+# estimated biomass based on trawling 
+sum(all_sampled_cells$observed_biomass, na.rm = T) / 0.1
+```
+
+if it was known that trawlable cells make up 70% of the area and that untrawlable made up remaining but at a higher biomass (according to eDNA ratio)... 
+```{r}
+# estimated biomass 
+((sum(all_sampled_cells$observed_biomass, na.rm = T) / 0.1)*0.7) + (sum(all_sampled_cells$observed_biomass, na.rm = T) / 0.1)*eDNA_ratio*0.3
+```
+
+
+### now ask gemini to write me a bootstrapped simulation code to do this many times 
+
+```{r}
+# Load necessary libraries
+library(dplyr)
+library(ggplot2)
+library(tidyr)
+
+# --- ADJUSTABLE PARAMETERS ---
+# Set the proportion of habitat that is trawlable
+p_trawlable <- 0.7 # e.g., 0.7 means 70% of the grid is trawlable
+
+# Set the proportion of cells to be sampled
+p_sample <- 0.2 # e.g., 0.1 means 10% of cells in each habitat type are sampled
+# -----------------------------
+
+
+# Define a function to run a single simulation with given parameters
+run_simulation <- function(prop_trawlable, sample_prop) {
+  
+  # 1. SET UP THE VIRTUAL WORLD
+  grid <- expand.grid(x = 1:20, y = 1:20)
+  n <- nrow(grid)
+  
+  # Create trawlable and untrawlable habitat based on the parameter
+  n_trawlable <- round(n * prop_trawlable)
+  n_untrawlable <- n - n_trawlable
+  trawlable_vals <- sample(1:5, n_trawlable, replace = TRUE)
+  untrawlable_vals <- sample(-4:0, n_untrawlable, replace = TRUE)
+  grid$bottom_type <- sample(c(trawlable_vals, untrawlable_vals))
+  
+  # 2. SIMULATE THE FISH POPULATION
+  beta <- -0.4625 # Pre-calculated beta
+  grid <- grid %>%
+    mutate(prob_presence = 1 / (1 + exp(beta * bottom_type)),
+           presence = rbinom(n, size = 1, prob = prob_presence))
+  
+  base_biomass <- 5
+  ut_multiplier <- 4
+  grid <- grid %>%
+    mutate(
+      biomass = ifelse(presence == 1, 
+                       base_biomass * ifelse(bottom_type <= 0, ut_multiplier, 1) * rlnorm(n, meanlog = 0, sdlog = 0.3), 
+                       0)
+    )
+  
+  true_biomass <- sum(grid$biomass)
+  
+  # 3. SIMULATE THE SURVEYS
+  trawlable_cells <- grid %>% filter(bottom_type > 0)
+  untrawlable_cells <- grid %>% filter(bottom_type <= 0)
+  
+  # Sample a fraction of each habitat type based on the parameter
+  trawlable_sampled_cells <- trawlable_cells %>% sample_frac(sample_prop)
+  untrawlable_sampled_cells <- untrawlable_cells %>% sample_frac(sample_prop)
+  
+  trawlable_sampled_cells <- trawlable_sampled_cells %>%
+    mutate(observed_biomass = pmax(0, rnorm(n(), mean = biomass, sd = 0.2 * biomass)))
+  
+  all_sampled_cells <- bind_rows(trawlable_sampled_cells, untrawlable_sampled_cells)
+  
+  alpha <- 50
+  all_sampled_cells <- all_sampled_cells %>%
+    mutate(eDNA_conc = rlnorm(n(), meanlog = log(alpha * biomass + 1e-3), sdlog = 0.3))
+    
+  # 4. CALCULATE BIOMASS ESTIMATES
+  eDNA_summary <- all_sampled_cells %>%
+    mutate(class = ifelse(bottom_type > 0, "trawlable", "untrawlable")) %>%
+    group_by(class) %>%
+    summarise(mean_eDNA = mean(eDNA_conc, na.rm = TRUE))
+  
+  ratio_df <- tidyr::spread(eDNA_summary, class, mean_eDNA)
+  eDNA_ratio <- ifelse(nrow(ratio_df) > 0 && "trawlable" %in% names(ratio_df) && ratio_df$trawlable > 0, 
+                       ratio_df$untrawlable / ratio_df$trawlable, 0)
+  
+  total_observed_biomass <- sum(trawlable_sampled_cells$observed_biomass, na.rm = TRUE)
+  
+  # Estimate 1: Trawl-only (extrapolated using sample proportion)
+  trawl_only_estimate <- total_observed_biomass / sample_prop
+  
+  # Estimate 2: Trawl + eDNA (using habitat and sample proportions)
+  prop_untrawlable <- 1 - prop_trawlable
+  biomass_from_trawlable <- (total_observed_biomass / sample_prop) * prop_trawlable
+  biomass_from_untrawlable <- (total_observed_biomass / sample_prop) * eDNA_ratio * prop_untrawlable
+  trawl_edna_estimate <- biomass_from_trawlable + biomass_from_untrawlable
+
+  return(c(
+    true_biomass = true_biomass,
+    trawl_only = trawl_only_estimate,
+    trawl_plus_eDNA = trawl_edna_estimate
+  ))
+}
+
+# Run the simulation 1,000 times with the specified parameters
+set.seed(42) # For reproducible results
+n_reps <- 1000
+results_matrix <- replicate(n_reps, run_simulation(prop_trawlable = p_trawlable, sample_prop = p_sample))
+
+# Process results into a tidy data frame for plotting
+results_df <- as.data.frame(t(results_matrix)) %>%
+  pivot_longer(
+    cols = c(trawl_only, trawl_plus_eDNA),
+    names_to = "method",
+    values_to = "estimate"
+  )
+
+# Calculate the average true biomass across all simulations
+mean_true_biomass <- mean(results_df$true_biomass)
+
+# 5. PLOT THE RESULTS
+ggplot(results_df, aes(x = estimate, fill = method)) +
+  geom_density(alpha = 0.6) +
+  geom_vline(aes(xintercept = mean_true_biomass), color = "black", linetype = "dashed", linewidth = 1) +
+  scale_fill_manual(values = c("trawl_only" = "#1f78b4", "trawl_plus_eDNA" = "#33a02c"),
+                    labels = c("Trawl-Only Estimate", "Trawl + eDNA Estimate")) +
+  labs(
+    title = "Distribution of Biomass Estimates from 1,000 Simulations",
+    subtitle = paste0("Trawlable Habitat: ", p_trawlable * 100, "%, Sample Intensity: ", p_sample * 100, "%"),
+    x = "Estimated Biomass",
+    y = "Density",
+    fill = "Estimation Method"
+  ) +
+  annotate("text", x = mean_true_biomass, y = 0, label = "Mean True\n Biomass", vjust = -0.5, hjust = -0.1, color = "black") +
+  theme_minimal()
+```
+
+next try a model-based estimation of biomass based on sampled data (i.e. tinyVAST)
+
+use the data frame set up above 
+```{r}
+ggplot(all_sampled_cells, aes(x = x, y = y, fill = observed_biomass)) +
+  geom_tile() +
+  scale_fill_viridis_c() +
+  theme_minimal()
+
+ggplot(all_sampled_cells, aes(x = x, y = y, fill = eDNA_conc)) +
+  geom_tile() +
+  scale_fill_viridis_c() +
+  theme_minimal()
+```
+
+fit the model 
+```{r, results = 'hide'}
+library(tinyVAST)
+library(fmesher)
+library(sf)
+
+sim_data <- all_sampled_cells
+sim_data$species <- "species_A"
+
+# make mesh
+mesh = fm_mesh_2d(grid[,c('x','y')], 
+                   cutoff = 0.1 )
+mesh = fm_refine(mesh)
+plot(mesh)
+
+# separate spatial sd
+#sem = "
+#  species_A <-> species_A, SD # sd_species_A
+#  species_B <-> species_B, SD # sd_species_B
+#  species_C <-> species_C, SD # sd_species_C
+#"
+
+# define distribution 
+Family = list(
+    "species_A" = tweedie(link="log")
+  )
+
+# Formula for simulation with site replicates (i.e. adding in random effect of site)
+#formula = observed_biomass ~ 0 + species
+formula = observed_biomass ~ 1
+
+# add error_level column
+sim_data$error_level <- sim_data$species
+ 
+# fit model
+out = tinyVAST( data = sim_data,
+                formula = formula,
+                spatial_domain = mesh,
+                #space_term = sem,
+                family = Family,
+                space_columns = c("x", "y"),
+                #variable_column = "species",
+                distribution_column = "error_level",
+                control = tinyVASTcontrol(
+                  trace = 1,
+                  calculate_deviance_explained = FALSE
+                ) )
+```
+
+look at model output
+```{r}
+out
+```
+
+predict biomass 
+```{r}
+# Make prediction grid (all spatial locations you want predictions for)
+pred_grid <- grid[,c(1:2)] %>%
+  mutate(species = "species_A",
+         error_level = "species_A")
+
+# Predict expected biomass
+pred_out <- predict(
+  out,
+  newdata = pred_grid,
+  #type = "response",  # "response" gives back biomass scale, not link scale
+  what = "p_g",
+  se.fit = TRUE
+)
+
+# Add predictions to grid
+pred_grid$predicted_biomass <- pred_out$fit
+pred_grid$predicted_biomass_se <- pred_out$se.fit
+
+pred_grid$area <- 1
+
+# Integrate the fitted model to get total biomass 
+total_biomass <- integrate_output(out,
+                                  newdata = pred_grid,
+                                  area = pred_grid$area,
+                                  bias.correct=FALSE,
+                                  apply.epsilon=FALSE)
+```
+

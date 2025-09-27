@@ -1,0 +1,69 @@
+---
+title: "composite untrawlable habitat map for GOA"
+output: html_document
+date: "2025-09-25"
+---
+
+libraries
+```{r}
+library(sf)
+library(ggplot2)
+library(tidyverse)
+
+```
+
+the data - from: https://www.sciencedirect.com/science/article/pii/S0165783623001789
+```{r}
+map <- read.csv("data/grid_table_w_data_4.csv")
+
+map_sf <- st_as_sf(map, coords = c("long", "lat"), crs = 4326)
+
+ggplot(map_sf) + 
+  geom_sf(aes(color = score), size = 0.5) +
+  #scale_color_viridis_c() +  
+  scale_color_gradient2(low = "#BC4700", mid = "#D0D0D0", high = "#00467F", midpoint = 0, breaks = -4:5, labels = -4:5) + 
+  theme_minimal() +
+  labs(color = "Score")
+
+ggplot(map_sf) + 
+  geom_sf(aes(color = score2), size = 0.5) +
+  scale_color_manual(values = c("#00467F", "#D0D0D0", "#BC4700")) + 
+  theme_minimal() +
+  labs(color = "Category")
+```
+
+theses are just points, so would need to convert to grid and put in utm 
+
+
+play around with afsc-gap-products info
+```{r}
+library(akgfmaps)
+
+goa <- akgfmaps::get_base_layers(select.region = "goa", set.crs = "EPSG:3338")
+
+goa_plot <- ggplot() +
+  geom_sf(data = goa$akland) +
+  #geom_sf(data = goa$bathymetry) +
+  geom_sf(data = goa$survey.area, fill = NA) +
+  geom_sf(data = goa$survey.strata, fill = NA) +
+  #geom_sf(data = goa$graticule, color = "grey70", alpha = 0.5) +
+  coord_sf(xlim = goa$plot.boundary$x, 
+           ylim = goa$plot.boundary$y) +
+  scale_x_continuous(name = "Longitude", 
+                     breaks = goa$lon.breaks) + 
+  scale_y_continuous(name = "Latitude", 
+                     breaks = goa$lat.breaks) + 
+  theme_bw()
+
+goa_plot
+```
+
+get trawlable/untrawlable grid from afsc-gap-products
+```{r}
+goa_trawlable_grid <- st_read("data/goa_trawlable_grid_1984to2023")
+
+ggplot(goa_trawlable_grid) +
+  geom_sf(aes(fill = TRAWLAB)) +
+  scale_fill_manual(values = c("N" = "red", "Y" = "blue", "NA" = "grey90")) +
+  theme_minimal()
+```
