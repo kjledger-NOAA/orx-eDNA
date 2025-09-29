@@ -1,0 +1,225 @@
+---
+title: "simulation_tinyVAST"
+output: html_document
+date: "2025-09-29"
+---
+
+```{r}
+# --- 1. LOAD LIBRARIES ---
+# Ensure these libraries are installed: install.packages(c("dplyr", "ggplot2", "tidyr", "tinyVAST", "fmesher", "sf"))
+library(dplyr)
+library(ggplot2)
+library(tidyr)
+library(tinyVAST)
+library(fmesher)
+library(sf)
+
+# --- 2. SET SIMULATION PARAMETERS ---
+set.seed(123) # for reproducible results
+n_simulations <- 500 # Number of bootstrap replicates
+prop_trawlable <- 0.7 # Proportion of the grid that is trawlable
+sample_prop <- 0.1 # Proportion of cells sampled in each habitat type (trawlable and untrawlable)
+
+# --- 3. DEFINE THE SIMULATION FUNCTION ---
+# This function runs a single, complete simulation from world generation to estimation.
+run_single_simulation <- function(sim_id) {
+  
+  # --- A. CREATE VIRTUAL WORLD & POPULATION ---
+  grid <- expand.grid(x = 1:20, y = 1:20)
+  n <- nrow(grid)
+  
+  # Define habitat types
+  n_trawlable <- round(n * prop_trawlable)
+  n_untrawlable <- n - n_trawlable
+  trawlable_vals <- sample(1:5, n_trawlable, replace = TRUE)
+  untrawlable_vals <- sample(-4:0, n_untrawlable, replace = TRUE)
+  grid$bottom_type <- sample(c(trawlable_vals, untrawlable_vals))
+  
+  # Simulate fish presence and biomass
+  beta <- -0.4625 # Pre-calculated beta for habitat preference - this makes fish ~4x more likely to be present in untrawlable hab (value = -4) than trawlable hab (value = 5)
+  base_biomass <- 5
+  ut_multiplier <- 4 # Biomass is 4x higher in untrawlable areas
+  
+  grid <- grid %>%
+    mutate(
+      prob_presence = 1 / (1 + exp(beta * bottom_type)),
+      presence = rbinom(n, size = 1, prob = prob_presence),
+      biomass = ifelse(presence == 1, base_biomass * ifelse(bottom_type <= 0, ut_multiplier, 1) * rlnorm(n, meanlog = 0, sdlog = 0.3), 0)
+    )
+  
+  true_total_biomass <- sum(grid$biomass)
+  
+  # --- B. SIMULATE SURVEY SAMPLING ---
+  trawlable_cells <- grid %>% filter(bottom_type > 0)
+  untrawlable_cells <- grid %>% filter(bottom_type <= 0)
+  
+  trawlable_sampled <- trawlable_cells %>% sample_frac(sample_prop)
+  untrawlable_sampled <- untrawlable_cells %>% sample_frac(sample_prop)
+  
+  # *** MODIFIED SECTION: DELTA MODEL FOR TRAWL CATCH ***
+  # Trawl survey observes biomass with error using a Delta (two-part) model
+  trawlable_sampled <- trawlable_sampled %>%
+    mutate(
+      # Part 1: Simulate the probability of encountering/catching fish if they are present
+      p_encounter = ifelse(biomass > 0, 0.85, 0), # 85% chance of a non-zero catch if biomass > 0
+      catch_success = rbinom(n(), 1, prob = p_encounter),
+      
+      # Part 2: If catch is successful, simulate the positive catch amount using a Gamma distribution
+      cv = 0.25, # Coefficient of variation for positive catches
+      shape = 1 / cv^2,
+      scale = biomass * cv^2,
+      # Ensure scale is non-zero to avoid errors in rgamma
+      positive_catch_amount = ifelse(scale > 0, rgamma(n(), shape = shape, scale = scale), 0), 
+      
+      # Combine to get final observed biomass
+      observed_biomass = catch_success * positive_catch_amount
+    )
+  
+  # eDNA survey covers both areas - simulate eDNA conc using log-normal process 
+  all_sampled_cells <- bind_rows(trawlable_sampled, untrawlable_sampled)
+  alpha <- 50 # Biomass to eDNA conversion factor
+  all_sampled_cells <- all_sampled_cells %>%
+    mutate(eDNA_conc = rlnorm(n(), meanlog = log(alpha * biomass + 1e-3), sdlog = 0.1))
+
+  # --- C. CALCULATE ESTIMATES ---
+  
+  # Model-Based (tinyVAST) estimate of biomass based on trawl survey
+  # This is wrapped in tryCatch to prevent a single model failure from stopping the loop
+  tinyVAST_estimate <- NA # Default to NA
+  try({
+    # Prepare data for model (only trawl data has an observed_biomass response)
+    model_data <- trawlable_sampled %>%
+      mutate(error_level = "species_A")
+      
+    # Create spatial mesh
+    mesh <- fm_mesh_2d(grid[, c('x', 'y')], cutoff = 2.0, max.edge = c(5, 20))
+    
+    # define distribution 
+    Family = list("species_A" = tweedie(link="log"))
+    
+    # define formula 
+    formula = observed_biomass ~ 1
+    
+    # Fit the spatial model
+    fit <- tinyVAST(
+      data = model_data,
+      formula = formula,
+      spatial_domain = mesh,
+      family = Family,
+      space_columns = c("x", "y"),
+      distribution_column = "error_level",
+      control = tinyVASTcontrol(silent = TRUE) # Suppress console output
+    )
+    
+    # Create grid for prediction over the entire area
+    pred_grid <- grid %>%
+      mutate(species = "species_A",
+         error_level = "species_A", 
+         area = 1) 
+
+# Predict expected biomass
+pred_out <- predict(fit,
+  newdata = pred_grid,
+  #type = "response",  # "response" gives back biomass scale, not link scale
+  what = "p_g",
+  se.fit = TRUE
+)
+
+    # Add predictions to grid
+    pred_grid$predicted_biomass <- pred_out$fit
+    pred_grid$predicted_biomass_se <- pred_out$se.fit
+      
+    # Integrate predictions to get total biomass index
+    total_biomass_index <- integrate_output(fit,
+                                            newdata = pred_grid,
+                                            area = pred_grid$area,
+                                            bias.correct=FALSE,
+                                            apply.epsilon=FALSE)
+    
+    tinyVAST_estimate <- total_biomass_index[1]
+}, silent = TRUE)
+  
+  # Save untrawlable to trawlable DNA ratio
+  eDNA_summary <- all_sampled_cells %>%
+    mutate(class = ifelse(bottom_type > 0, "trawlable", "untrawlable")) %>%
+    group_by(class) %>%
+    summarise(mean_eDNA = mean(eDNA_conc, na.rm = TRUE), .groups = 'drop')
+  
+  eDNA_ratio <- (eDNA_summary$mean_eDNA[eDNA_summary$class == "untrawlable"] / 
+                 eDNA_summary$mean_eDNA[eDNA_summary$class == "trawlable"])
+  
+  # Calculate estimated biomass that incorportes DNA ratio 
+  prop_untrawlable <- 1 - prop_trawlable
+  biomass_from_trawlable <- tinyVAST_estimate * prop_trawlable
+  biomass_from_untrawlable <- tinyVAST_estimate * eDNA_ratio * prop_untrawlable
+  trawl_edna_estimate <- biomass_from_trawlable + biomass_from_untrawlable
+  
+  # --- D. RETURN RESULTS ---
+  return(data.frame(
+    sim_id = sim_id,
+    true_biomass = true_total_biomass,
+    estimated_biomass = tinyVAST_estimate,
+    DNA_ratio = eDNA_ratio,
+    adjusted_biomass = trawl_edna_estimate
+  ))
+}
+
+# --- 4. RUN THE BOOTSTRAP SIMULATION ---
+results_list <- lapply(1:n_simulations, run_single_simulation)
+results_df <- bind_rows(results_list)
+
+# --- 5. PROCESS AND VISUALIZE RESULTS ---
+# Reshape data for plotting and analysis
+results_long <- results_df %>%
+  select(!DNA_ratio) %>%
+  pivot_longer(
+    cols = c(estimated_biomass, adjusted_biomass),
+    names_to = "method",
+    values_to = "estimate"
+  ) %>%
+  na.omit() # Remove any failed tinyVAST runs
+
+# Calculate summary statistics and 95% confidence intervals
+summary_stats <- results_long %>%
+  group_by(method) %>%
+  summarise(
+    mean_estimate = mean(estimate),
+    median_estimate = median(estimate),
+    lower_95_ci = quantile(estimate, 0.025),
+    upper_95_ci = quantile(estimate, 0.975),
+    .groups = 'drop'
+  )
+
+mean_true_biomass <- mean(results_df$true_biomass)
+observed_biomass <- mean(results_df$estimated_biomass)
+adjusted_biomass <- mean(results_df$adjusted_biomass)
+
+
+# Plot the distributions of the estimates
+plot1 <- ggplot(results_long, aes(x = estimate, fill = method)) +
+  geom_density(alpha = 0.7) +
+  geom_vline(aes(xintercept = mean_true_biomass), color = "black", linetype = "dashed", linewidth = 1.2) +
+  geom_vline(aes(xintercept = observed_biomass), color = "orange", linetype = "dashed", linewidth = 1.2) +
+  geom_vline(aes(xintercept = adjusted_biomass), color = "#7570b3", linetype = "dashed", linewidth = 1.2) +
+  scale_fill_manual(
+    values = c("estimated_biomass" = "#d95f02", "adjusted_biomass" = "#7570b3"),
+    labels = c("estimated_biomass" = "trawl-only", "adjusted_biomass" = "eDNA-adjusted")
+  ) +
+  annotate("text", x = mean_true_biomass, y = 0, label = "Mean True\nBiomass", vjust = -0.5, hjust = -0.1, color = "black") +
+  labs(
+    title = "Distribution of Biomass Estimates",
+    subtitle = paste0(n_simulations, " simulations | ", prop_trawlable * 100, "% Trawlable Habitat | ", sample_prop * 100, "% Sample Intensity"),
+    x = "Estimated Total Biomass",
+    y = "Density",
+    fill = "Biomass Estimation Method"
+  ) +
+  theme_minimal(base_size = 14)
+
+plot1
+```
+
+
+```{r}
+ggsave("../figures/estimated_biomass.png", plot1, width = 10, height = 5, dpi = 300)
+```
+

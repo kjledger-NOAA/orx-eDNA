@@ -184,6 +184,18 @@ if it was known that trawlable cells make up 70% of the area and that untrawlabl
 ((sum(all_sampled_cells$observed_biomass, na.rm = T) / 0.1)*0.7) + (sum(all_sampled_cells$observed_biomass, na.rm = T) / 0.1)*eDNA_ratio*0.3
 ```
 
+based on this, catchability (q) would be: 
+```{r}
+density_in_trawlable <- sum(all_sampled_cells$observed_biomass, na.rm = T) / 0.1
+density_in_untrawlable <- sum(all_sampled_cells$observed_biomass, na.rm = T) / 0.1*eDNA_ratio
+area_trawlable <- 0.7 
+area_untrawlable <- 0.3
+
+q <- density_in_trawlable*(area_trawlable+area_untrawlable)/((density_in_trawlable*area_trawlable)+(density_in_untrawlable*area_untrawlable))
+q
+```
+
+
 
 ### now ask gemini to write me a bootstrapped simulation code to do this many times 
 
@@ -195,10 +207,10 @@ library(tidyr)
 
 # --- ADJUSTABLE PARAMETERS ---
 # Set the proportion of habitat that is trawlable
-p_trawlable <- 0.7 # e.g., 0.7 means 70% of the grid is trawlable
+p_trawlable <- 0.7 
 
 # Set the proportion of cells to be sampled
-p_sample <- 0.2 # e.g., 0.1 means 10% of cells in each habitat type are sampled
+p_sample <- 0.2 
 # -----------------------------
 
 
@@ -408,5 +420,11 @@ total_biomass <- integrate_output(out,
                                   area = pred_grid$area,
                                   bias.correct=FALSE,
                                   apply.epsilon=FALSE)
+
+total_biomass
 ```
+
+
+
+
 

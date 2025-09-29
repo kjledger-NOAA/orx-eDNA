@@ -60,10 +60,31 @@ goa_plot
 
 get trawlable/untrawlable grid from afsc-gap-products
 ```{r}
-goa_trawlable_grid <- st_read("data/goa_trawlable_grid_1984to2023")
+goa_trawlable_grid <- st_read("../data/goa_trawlable_grid_1984to2023")
 
 ggplot(goa_trawlable_grid) +
   geom_sf(aes(fill = TRAWLAB)) +
   scale_fill_manual(values = c("N" = "red", "Y" = "blue", "NA" = "grey90")) +
   theme_minimal()
 ```
+
+here is the updated trawlable/untrawlable grid based on the 2025 survey redesign
+```{r}
+goa_trawlable_grid_2025 <- st_read("../data/goaai_grid_2025")
+
+ggplot(goa_trawlable_grid_2025) +
+  geom_sf() + #aes(fill = TRAWLAB)
+  #scale_fill_manual(values = c("N" = "red", "Y" = "blue", "NA" = "grey90")) +
+  theme_minimal()
+
+goa_stations_2025 <- st_read("../data/goa_stations_2025.gpkg")
+
+ggplot(goa_stations_2025) +
+  geom_sf(aes(fill = TRAWLABLE)) + 
+  scale_fill_manual(values = c("N" = "red", "Y" = "blue", "UNK" = "grey90")) +
+  theme_minimal()
+```
+
+
+there is also a model of trawlable area here: https://onlinelibrary.wiley.com/doi/abs/10.1111/fog.12442
+
